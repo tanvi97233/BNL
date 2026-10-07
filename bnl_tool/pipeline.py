@@ -54,7 +54,7 @@ def run_pipeline(settings: Settings, start_date: date, end_date: date, *, max_pa
             decisions[paper.url] = decision
     elif not dry_run:
         raise RuntimeError("XAI_API_KEY is required for a non-dry run")
-    included = [(paper, decisions[paper.url]) for paper in papers if decisions[paper.url].include]
+    included = [(paper, decision) for paper in papers if (decision := decisions.get(paper.url)) and decision.include]
     qc = run_qc(papers, decisions, search_executions, all_hits, duplicates, start_date, end_date)
     base = f"BNL_{start_date.isoformat()}_to_{end_date.isoformat()}"; report_path = run_dir / f"{base}{'_DRAFT' if not qc.passed else ''}.docx"
     write_docx(report_path, included, start_date, end_date, draft=not qc.passed)

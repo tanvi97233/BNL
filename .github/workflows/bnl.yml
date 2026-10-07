@@ -28,13 +28,18 @@ jobs:
       - name: Run unit tests
         run: pytest -q
       - name: Run real Google smoke test
-        id: smoke
+        id: run-smoke
+        continue-on-error: true
         shell: bash
         run: |
-          set +e
+          set -o pipefail
           python main.py --dry-run --only-string 1 --max-pages 1 --end-date 2026-10-07 2>&1 | tee smoke_test.log
-          app_exit=${PIPESTATUS[0]}
-          export APP_EXIT="$app_exit"
+      - name: Classify smoke-test result
+        if: always()
+        shell: bash
+        env:
+          SMOKE_STEP_OUTCOME: ${{ steps.run-smoke.outcome }}
+        run: |
           python - <<'PY'
           import json
           import os
@@ -56,16 +61,14 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write("## BNL Google smoke test\n\n")
               summary.write(f"**Result:** `{result}`\n\n**Detail:** {detail}\n\n")
-              summary.write(f"Application exit code: `{os.environ['APP_EXIT']}`. A dry run normally returns `2` because 36-string QC coverage intentionally fails.\n")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"result={result}\n")
+              summary.write(f"Application step outcome: `{os.environ['SMOKE_STEP_OUTCOME']}`. A dry run normally returns a non-zero code because 36-string QC coverage intentionally fails.\n")
           PY
           result=$(head -n1 smoke_result.txt)
           echo "Smoke-test classification: $result"
           # A Google block is a valid, auditable smoke-test outcome. Only an
           # application/setup failure should fail this workflow.
           if [ "$result" = "APPLICATION_ERROR" ]; then
-            if [ "$app_exit" -eq 0 ]; then exit 1; else exit "$app_exit"; fi
+            exit 1
           fi
       - name: Upload BNL output
         uses: actions/upload-artifact@v4
