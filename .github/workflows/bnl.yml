@@ -1,0 +1,88 @@
+name: BNL Google smoke test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  google-smoke-test:
+    name: Google string 1 smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # A smoke test exercises Google/browser discovery only. It intentionally
+      # has no xAI secret, so it cannot make model-screening requests.
+      BROWSER_HEADLESS: 'true'
+      BROWSER_CHANNEL: chromium
+      BROWSER_PROFILE_DIR: .cache/github-google-profile
+      GOOGLE_DELAY_MS: '1500'
+      GOOGLE_HOME_WAIT_MS: '2500'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Run unit tests
+        run: pytest -q
+      - name: Run real Google smoke test
+        id: smoke
+        shell: bash
+        run: |
+          set +e
+          python main.py --dry-run --only-string 1 --max-pages 1 --end-date 2026-10-07 2>&1 | tee smoke_test.log
+          app_exit=${PIPESTATUS[0]}
+          export APP_EXIT="$app_exit"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          logs = sorted(Path("output").glob("*/search_log.json"), key=lambda p: p.stat().st_mtime)
+          result, detail = "APPLICATION_ERROR", "search_log.json was not created"
+          if logs:
+              entries = json.loads(logs[-1].read_text(encoding="utf-8"))
+              first = entries[0] if entries else {}
+              status = first.get("status", "UNKNOWN")
+              if status == "GOOGLE_BLOCKED":
+                  result, detail = "GOOGLE_BLOCKED", first.get("error", "Google returned a challenge")
+              elif status == "COMPLETE" and first.get("date_filter_applied") and first.get("pages_processed", 0) >= 1:
+                  result, detail = "SUCCESSFUL_GOOGLE_SEARCH", f"{len(first.get('hits', []))} rendered organic result(s) on {first.get('pages_processed')} page(s)"
+              else:
+                  result, detail = "APPLICATION_ERROR", f"search status={status}; date_filter_applied={first.get('date_filter_applied')}; pages_processed={first.get('pages_processed')}"
+          Path("smoke_result.txt").write_text(f"{result}\n{detail}\n", encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## BNL Google smoke test\n\n")
+              summary.write(f"**Result:** `{result}`\n\n**Detail:** {detail}\n\n")
+              summary.write(f"Application exit code: `{os.environ['APP_EXIT']}`. A dry run normally returns `2` because 36-string QC coverage intentionally fails.\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"result={result}\n")
+          PY
+          result=$(head -n1 smoke_result.txt)
+          echo "Smoke-test classification: $result"
+          # A Google block is a valid, auditable smoke-test outcome. Only an
+          # application/setup failure should fail this workflow.
+          if [ "$result" = "APPLICATION_ERROR" ]; then
+            if [ "$app_exit" -eq 0 ]; then exit 1; else exit "$app_exit"; fi
+          fi
+      - name: Upload BNL output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bnl-google-smoke-output
+          path: |
+            output/
+            smoke_test.log
+            smoke_result.txt
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Upload Google block diagnostics
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bnl-google-block-diagnostics
+          path: .cache/google-blocked/
+          retention-days: 30
+          if-no-files-found: warn
