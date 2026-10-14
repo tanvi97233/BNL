@@ -51,8 +51,17 @@ with st.sidebar:
     if (end - start).days != 14:
         st.warning("Selected range is not 14 days.")
     st.header("Search configuration")
-    limit = st.selectbox("Maximum Google result pages per search string", [1, 2, 3, 4, 5], index=4)
-    st.caption("SerpApi requests Google result offsets 0, 10, 20, 30, and 40 up to this limit, stopping when Google supplies no next page.")
+    run_mode = st.radio("Run scope", ["Test one search string", "Full newsletter: all 36 search strings"], index=0)
+    if run_mode == "Test one search string":
+        test_string_number = st.selectbox("Test search string", search_strings["number"].tolist(), index=0)
+        limit = 1
+        active_search_strings = search_strings.loc[search_strings["number"] == test_string_number].copy()
+        st.caption("Test mode uses one SerpApi Google request: one source query and page 1 only.")
+    else:
+        test_string_number = None
+        limit = st.selectbox("Maximum Google result pages per search string", [1, 2, 3, 4, 5], index=4)
+        active_search_strings = search_strings
+        st.caption("Full mode requests Google offsets 0, 10, 20, 30, and 40 up to this limit, stopping when Google supplies no next page.")
     search_setup_error = serpapi_setup_error()
     if search_setup_error:
         st.error(search_setup_error)
@@ -83,8 +92,10 @@ def execute() -> None:
     st.session_state.bnl_is_running = True
     try:
         save_run(new_run_state(start, end, int(limit), "bnl_research"))
-        st.session_state.bnl_run = run_newsletter_search(
-            search_strings,
+        st.session_state.bnl_run["queries_planned"] = len(active_search_strings)
+        st.session_state.bnl_run["run_mode"] = run_mode
+        completed_run = run_newsletter_search(
+            active_search_strings,
             diseases,
             start,
             end,
@@ -95,6 +106,9 @@ def execute() -> None:
             workflow="bnl_research",
             require_google_coverage=False,
         )
+        completed_run["queries_planned"] = len(active_search_strings)
+        completed_run["run_mode"] = run_mode
+        st.session_state.bnl_run = completed_run
         progress_text.success("Search, verification, screening, and export preparation completed. Results remain available while this Streamlit session is open.")
     finally:
         st.session_state.bnl_is_running = False
@@ -105,16 +119,17 @@ tabs = st.tabs(["RUN", "CANDIDATES", "INCLUDED", "REJECTED", "NEEDS MANUAL REVIE
 with tabs[0]:
     st.subheader("BNL Research Search & Screening")
     st.write(f"Inclusive date range: {start.strftime('%d %B %Y')} → {end.strftime('%d %B %Y')}")
-    st.caption("The original 36 search strings are executed sequentially and unchanged through Google Search via SerpApi. Crossref is used only to enrich DOI metadata.")
+    st.caption("The original search strings are executed sequentially and unchanged through Google Search via SerpApi. Crossref is used only to enrich DOI metadata.")
     can_run = valid_search_strings(search_strings) and start <= end and not search_setup_error
-    if st.button("RUN BI-WEEKLY NEWSLETTER", type="primary", disabled=not can_run or st.session_state.bnl_is_running):
+    run_label = "RUN TEST SEARCH" if run_mode == "Test one search string" else "RUN BI-WEEKLY NEWSLETTER"
+    if st.button(run_label, type="primary", disabled=not can_run or st.session_state.bnl_is_running):
         execute()
 
     run = st.session_state.bnl_run
     if run:
         st.subheader(f"Stored result — {run['run_status']}")
         metrics = st.columns(6)
-        metrics[0].metric("Queries attempted", f"{len(run['search_coverage'])}/36")
+        metrics[0].metric("Queries attempted", f"{len(run['search_coverage'])}/{run.get('queries_planned', len(run['search_coverage']))}")
         metrics[1].metric("Raw results", run["funnel"]["records_retrieved"])
         metrics[2].metric("Unique candidates", run["funnel"]["remaining_after_deduplication"])
         metrics[3].metric("Verified", run["funnel"]["verified_candidates"])
