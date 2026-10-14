@@ -29,7 +29,7 @@ Configure `SERPAPI_API_KEY` in `.env` locally or Streamlit Secrets in Cloud. Ser
 
 ## Low-credit diagnostic run
 
-The sidebar starts in **Safe single-request test mode**. Select exactly one of the 36 unchanged source strings and press **RUN SAFE TEST SEARCH**. It requests page 1 only and makes no automatic retry, so its request estimate is exactly one SerpApi search request. The **RAW RESULTS** tab shows every extracted Google organic result before deduplication or scientific screening. The **SEARCH LOG** tab records the HTTP status, SerpApi status/error, exact returned query, date-filter parameter, start offset, organic-result count, extracted-record count, and timestamp without exposing the API key.
+The sidebar starts with search string 1 selected and one results page selected. Press **RUN BNL SEARCH & SCREENING** to make one SerpApi request with no automatic retry. Select any subset of the unchanged 36 source strings and adjust the page limit when ready. The **RAW RESULTS** tab shows every extracted Google organic result before deduplication or scientific screening. The **SEARCH LOG** tab records the HTTP status, SerpApi status/error, exact returned query, date-filter parameter, start offset, organic-result count, extracted-record count, and timestamp without exposing the API key.
 
 Turn off safe mode only after inspecting that result. You may select any subset of strings and choose one to five pages; the sidebar displays both the baseline request count and the worst-case count if retries are needed.
 

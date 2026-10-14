@@ -53,8 +53,7 @@ with st.sidebar:
     if (end - start).days != 14:
         st.warning("Selected range is not 14 days.")
     st.header("Search configuration")
-    safe_test_mode = st.checkbox("Safe single-request test mode", value=True, help="Runs exactly one selected string, page 1, with no automatic retries.")
-    with st.expander("Select search strings (36)", expanded=safe_test_mode):
+    with st.expander("Select search strings (36)", expanded=True):
         first, second = st.columns(2)
         if first.button("Select All"):
             st.session_state.bnl_selected_strings = set(search_strings["number"].tolist())
@@ -75,17 +74,14 @@ with st.sidebar:
         st.session_state.bnl_selected_strings = {int(number) for number in search_strings["number"] if st.session_state.get(f"query_select_{number}", False)}
     selected_numbers = sorted(st.session_state.bnl_selected_strings)
     st.write(f"Search strings selected: {len(selected_numbers)}/36")
-    if safe_test_mode:
-        limit, retries = 1, 0
-        st.caption("Safe test uses exactly one requested SerpApi page and no automatic retry. Select exactly one string.")
-    else:
-        limit = st.selectbox("Maximum Google result pages per selected search string", [1, 2, 3, 4, 5], index=0)
-        retries = 2
-        st.caption("Each page is a SerpApi search request. Failed pages may be retried up to two times.")
+    limit = st.selectbox("Maximum Google result pages per selected search string", [1, 2, 3, 4, 5], index=0)
+    retry_failed_pages = st.checkbox("Retry transient failed pages", value=False, help="Retries can consume additional SerpApi searches.")
+    retries = 2 if retry_failed_pages else 0
+    st.caption("The default is one page per selected query with no automatic retry.")
     active_search_strings = search_strings.loc[search_strings["number"].isin(selected_numbers)].copy()
     baseline_requests = len(active_search_strings) * int(limit)
-    estimate = baseline_requests if safe_test_mode else baseline_requests * (retries + 1)
-    st.info(f"Request estimate: {baseline_requests} baseline request(s)" + ("; safe mode makes no retries." if safe_test_mode else f"; up to {estimate} if every requested page needs retries."))
+    estimate = baseline_requests * (retries + 1)
+    st.info(f"Request estimate: {baseline_requests} baseline request(s)" + ("; no automatic retries." if not retry_failed_pages else f"; up to {estimate} if every requested page needs retries."))
     search_setup_error = serpapi_setup_error()
     if search_setup_error:
         st.error(search_setup_error)
@@ -120,7 +116,7 @@ def execute() -> None:
     try:
         save_run(new_run_state(start, end, int(limit), "bnl_research"))
         st.session_state.bnl_run["queries_planned"] = len(active_search_strings)
-        st.session_state.bnl_run["safe_test_mode"] = safe_test_mode
+        st.session_state.bnl_run["retry_failed_pages"] = retry_failed_pages
         completed_run = run_newsletter_search(
             active_search_strings,
             diseases,
@@ -134,7 +130,7 @@ def execute() -> None:
             require_google_coverage=False,
         )
         completed_run["queries_planned"] = len(active_search_strings)
-        completed_run["safe_test_mode"] = safe_test_mode
+        completed_run["retry_failed_pages"] = retry_failed_pages
         st.session_state.bnl_run = completed_run
         progress_text.success("Search, verification, screening, and export preparation completed. Results remain available while this Streamlit session is open.")
     finally:
@@ -159,25 +155,26 @@ with tabs[0]:
         st.info("SerpApi configured; not yet tested. A network/API request is made only when you press Run.")
     if last_success:
         st.caption(f"Last successful SerpApi page: {last_success}")
-    selection_error = "Select exactly one search string for safe test mode." if safe_test_mode and len(active_search_strings) != 1 else "Select at least one search string." if not len(active_search_strings) else ""
+    selection_error = "Select at least one search string." if not len(active_search_strings) else ""
     if selection_error:
         st.warning(selection_error)
     can_run = valid_search_strings(search_strings) and start <= end and not search_setup_error and not selection_error
-    run_label = "RUN SAFE TEST SEARCH" if safe_test_mode else "RUN SELECTED BNL SEARCH"
+    run_label = "RUN BNL SEARCH & SCREENING"
     if st.button(run_label, type="primary", disabled=not can_run or st.session_state.bnl_is_running):
         execute()
 
     run = st.session_state.bnl_run
     if run:
+        funnel = {key: run.get("funnel", {}).get(key, 0) for key in FUNNEL_KEYS}
         st.subheader(f"Stored result — {run['run_status']}")
         metrics = st.columns(6)
         metrics[0].metric("Queries attempted", f"{len(run['search_coverage'])}/{run.get('queries_planned', len(run['search_coverage']))}")
-        metrics[1].metric("Raw organic results", run["funnel"]["raw_organic_results"])
-        metrics[2].metric("Unique candidates", run["funnel"]["remaining_after_deduplication"])
-        metrics[3].metric("Verified", run["funnel"]["verified_candidates"])
-        metrics[4].metric("Included", run["funnel"]["final_included"])
-        metrics[5].metric("Manual review", run["funnel"]["awaiting_manual_verification"] + run["funnel"]["pending_screening"])
-        st.dataframe(pd.DataFrame([{"Stage": key.replace("_", " ").title(), "Count": run["funnel"][key]} for key in FUNNEL_KEYS]), hide_index=True, use_container_width=True)
+        metrics[1].metric("Raw organic results", funnel["raw_organic_results"])
+        metrics[2].metric("Unique candidates", funnel["remaining_after_deduplication"])
+        metrics[3].metric("Verified", funnel["verified_candidates"])
+        metrics[4].metric("Included", funnel["final_included"])
+        metrics[5].metric("Manual review", funnel["awaiting_manual_verification"] + funnel["pending_screening"])
+        st.dataframe(pd.DataFrame([{"Stage": key.replace("_", " ").title(), "Count": funnel[key]} for key in FUNNEL_KEYS]), hide_index=True, use_container_width=True)
         if run["filter_reasons"]:
             st.subheader("Rejection reasons")
             st.dataframe(pd.DataFrame([{"Reason": reason, "Count": count} for reason, count in run["filter_reasons"].items()]), hide_index=True, use_container_width=True)
