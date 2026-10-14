@@ -17,9 +17,10 @@ except ImportError:  # direct Streamlit execution from this directory
 
 
 FUNNEL_KEYS = [
+    "search_requests_attempted", "search_requests_successful", "raw_organic_results", "candidate_records_extracted",
     "records_retrieved", "usable_metadata", "passed_date_checks", "removed_non_paper",
     "removed_preprint_or_early_access", "removed_case_reports", "remaining_after_deduplication",
-    "verified_candidates", "sent_to_ai", "accepted_by_ai", "rejected_by_ai", "pending_screening", "awaiting_manual_verification", "final_included",
+    "verified_candidates", "sent_to_ai", "accepted_by_ai", "rejected_by_ai", "pending_screening", "awaiting_manual_verification", "technical_errors", "final_included",
 ]
 
 
@@ -88,6 +89,14 @@ def run_newsletter_search(
                 for entry in local_logs:
                     entry.update({"search_string_number": number, "original_query": query, "provider_query_or_url": entry.get("request", "")})
                     state["logs"].append(entry)
+                    if entry.get("page"):
+                        state["funnel"]["search_requests_attempted"] += 1
+                        state["funnel"]["raw_organic_results"] += int(entry.get("organic_results_received") or 0)
+                        state["funnel"]["candidate_records_extracted"] += int(entry.get("records_extracted") or 0)
+                        if entry.get("status") == "ok":
+                            state["funnel"]["search_requests_successful"] += 1
+                        else:
+                            state["funnel"]["technical_errors"] += 1
                 for paper in found:
                     paper["search_strings_found"] = [f"Search string {number}"]
                     paper["sources_found"] = [provider_name]
@@ -108,6 +117,7 @@ def run_newsletter_search(
             except Exception as exc:  # provider errors never halt remaining coverage
                 coverage["providers"].append({"provider": provider_name, "status": "ERROR", "records": 0, "result_cap_reached": False})
                 coverage["errors"].append(str(exc)); state["provider_errors"].append({"provider": provider_name, "search_string_number": number, "error": str(exc)})
+                state["funnel"]["technical_errors"] += 1
         state["search_coverage"].append(coverage)
         if state_sink:
             state_sink(state)
@@ -136,6 +146,8 @@ def run_newsletter_search(
             for entry in fetch_logs:
                 entry.update({"search_string_number": "; ".join(paper.get("search_strings_found", [])), "original_query": "source metadata verification", "provider_query_or_url": entry.get("request", "")})
                 state["logs"].append(entry)
+                if entry.get("status") == "error":
+                    state["funnel"]["technical_errors"] += 1
             for field, value in fetched.items():
                 if field in {"source", "paper_url"}:
                     continue

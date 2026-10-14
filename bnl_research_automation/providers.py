@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import time
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 from html import unescape
 from typing import Callable
 from urllib.parse import urlencode
@@ -181,7 +181,16 @@ def _serpapi_record(item: dict, *, query_number: int, query: str, page: int, goo
     }
 
 
-def search_serpapi_google(query: str, start_date: date, end_date: date, limit: int, log: Callable[[dict], None], *, query_number: int = 0) -> list[dict]:
+def search_serpapi_google(
+    query: str,
+    start_date: date,
+    end_date: date,
+    limit: int,
+    log: Callable[[dict], None],
+    *,
+    query_number: int = 0,
+    retries: int = 2,
+) -> list[dict]:
     """Run up to five sequential SerpApi Google result pages for one exact BNL query."""
     setup_error = serpapi_setup_error()
     if setup_error:
@@ -196,9 +205,12 @@ def search_serpapi_google(query: str, start_date: date, end_date: date, limit: i
         started = time.monotonic()
         payload: dict | None = None
         last_error = ""
-        for attempt in range(3):
+        # A page request is billable.  The UI's safe test mode passes zero
+        # retries so it is exactly one request, not an invisible retry loop.
+        for attempt in range(max(0, retries) + 1):
             try:
                 response = requests.get(SERPAPI_ENDPOINT, params=params, timeout=TIMEOUT, headers={"User-Agent": USER_AGENT})
+                http_status = response.status_code
                 if response.status_code in {408, 409, 429} or response.status_code >= 500:
                     raise requests.HTTPError(f"HTTP {response.status_code}: transient SerpApi response")
                 response.raise_for_status()
@@ -208,17 +220,37 @@ def search_serpapi_google(query: str, start_date: date, end_date: date, limit: i
                 break
             except (requests.RequestException, ValueError, RuntimeError) as exc:
                 last_error = str(exc)
-                if attempt < 2:
+                if attempt < retries:
                     time.sleep(1.5 * (attempt + 1))
         safe_request = f"engine=google&q=<exact query>&tbs={tbs}&start={(page - 1) * 10}&num=10"
         if payload is None:
-            log({"provider": "SerpApi Google", "status": "error", "error": last_error, "duration_seconds": round(time.monotonic() - started, 2), "request": safe_request, "page": page, "records": 0, "date_filter": tbs})
+            log({
+                "provider": "SerpApi Google", "status": "error", "error": last_error,
+                "duration_seconds": round(time.monotonic() - started, 2), "request": safe_request,
+                "page": page, "start_offset": (page - 1) * 10, "records": 0,
+                "organic_results_received": 0, "records_extracted": 0,
+                "http_status": locals().get("http_status", ""), "attempts": max(0, retries) + 1,
+                "date_filter": tbs, "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
             continue
         metadata = payload.get("search_metadata") or {}
         google_url = metadata.get("google_url") or ""
         organic = payload.get("organic_results") or []
-        log({"provider": "SerpApi Google", "status": "ok", "error": "", "duration_seconds": round(time.monotonic() - started, 2), "request": safe_request, "page": page, "records": len(organic), "date_filter": tbs, "google_url": google_url, "serpapi_status": metadata.get("status", "")})
-        records.extend(_serpapi_record(item, query_number=query_number, query=query, page=page, google_url=google_url) for item in organic if item.get("link"))
+        extracted = [_serpapi_record(item, query_number=query_number, query=query, page=page, google_url=google_url) for item in organic if item.get("link")]
+        log({
+            "provider": "SerpApi Google", "status": "ok", "error": "",
+            "duration_seconds": round(time.monotonic() - started, 2), "request": safe_request,
+            "page": page, "start_offset": (page - 1) * 10, "records": len(extracted),
+            "organic_results_received": len(organic), "records_extracted": len(extracted),
+            "http_status": locals().get("http_status", ""), "attempts": attempt + 1,
+            "date_filter": tbs, "google_url": google_url,
+            "serpapi_status": metadata.get("status", ""),
+            "serpapi_error": payload.get("error", ""),
+            "returned_query": (payload.get("search_parameters") or {}).get("q", ""),
+            "organic_results_state": (payload.get("search_information") or {}).get("organic_results_state", ""),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        records.extend(extracted)
         # No organic results or no next SerpApi page means Google supplied no
         # further page to process.  Never claim pages that were not returned.
         if not organic or not (payload.get("serpapi_pagination") or {}).get("next"):

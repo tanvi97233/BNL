@@ -35,6 +35,8 @@ if "bnl_run" not in st.session_state:
     st.session_state.bnl_run = None
 if "bnl_is_running" not in st.session_state:
     st.session_state.bnl_is_running = False
+if "bnl_selected_strings" not in st.session_state:
+    st.session_state.bnl_selected_strings = {1}
 
 
 with st.sidebar:
@@ -51,17 +53,39 @@ with st.sidebar:
     if (end - start).days != 14:
         st.warning("Selected range is not 14 days.")
     st.header("Search configuration")
-    run_mode = st.radio("Run scope", ["Test one search string", "Full newsletter: all 36 search strings"], index=0)
-    if run_mode == "Test one search string":
-        test_string_number = st.selectbox("Test search string", search_strings["number"].tolist(), index=0)
-        limit = 1
-        active_search_strings = search_strings.loc[search_strings["number"] == test_string_number].copy()
-        st.caption("Test mode uses one SerpApi Google request: one source query and page 1 only.")
+    safe_test_mode = st.checkbox("Safe single-request test mode", value=True, help="Runs exactly one selected string, page 1, with no automatic retries.")
+    with st.expander("Select search strings (36)", expanded=safe_test_mode):
+        first, second = st.columns(2)
+        if first.button("Select All"):
+            st.session_state.bnl_selected_strings = set(search_strings["number"].tolist())
+            for number in search_strings["number"]:
+                st.session_state[f"query_select_{number}"] = True
+            st.rerun()
+        if second.button("Clear All"):
+            st.session_state.bnl_selected_strings = set()
+            for number in search_strings["number"]:
+                st.session_state[f"query_select_{number}"] = False
+            st.rerun()
+        for _, row in search_strings.iterrows():
+            number = int(row["number"])
+            key = f"query_select_{number}"
+            if key not in st.session_state:
+                st.session_state[key] = number in st.session_state.bnl_selected_strings
+            st.checkbox(f"{number}. {row['search_string']}", key=key)
+        st.session_state.bnl_selected_strings = {int(number) for number in search_strings["number"] if st.session_state.get(f"query_select_{number}", False)}
+    selected_numbers = sorted(st.session_state.bnl_selected_strings)
+    st.write(f"Search strings selected: {len(selected_numbers)}/36")
+    if safe_test_mode:
+        limit, retries = 1, 0
+        st.caption("Safe test uses exactly one requested SerpApi page and no automatic retry. Select exactly one string.")
     else:
-        test_string_number = None
-        limit = st.selectbox("Maximum Google result pages per search string", [1, 2, 3, 4, 5], index=4)
-        active_search_strings = search_strings
-        st.caption("Full mode requests Google offsets 0, 10, 20, 30, and 40 up to this limit, stopping when Google supplies no next page.")
+        limit = st.selectbox("Maximum Google result pages per selected search string", [1, 2, 3, 4, 5], index=0)
+        retries = 2
+        st.caption("Each page is a SerpApi search request. Failed pages may be retried up to two times.")
+    active_search_strings = search_strings.loc[search_strings["number"].isin(selected_numbers)].copy()
+    baseline_requests = len(active_search_strings) * int(limit)
+    estimate = baseline_requests if safe_test_mode else baseline_requests * (retries + 1)
+    st.info(f"Request estimate: {baseline_requests} baseline request(s)" + ("; safe mode makes no retries." if safe_test_mode else f"; up to {estimate} if every requested page needs retries."))
     search_setup_error = serpapi_setup_error()
     if search_setup_error:
         st.error(search_setup_error)
@@ -72,6 +96,9 @@ with st.sidebar:
 def save_run(state: dict) -> None:
     """Persist partial work before Streamlit reruns or a later query fails."""
     st.session_state.bnl_run = state
+    successful = [entry for entry in state.get("logs", []) if entry.get("provider") == "SerpApi Google" and entry.get("status") == "ok"]
+    if successful:
+        st.session_state.bnl_last_serpapi_success = successful[-1].get("timestamp", "")
 
 
 def execute() -> None:
@@ -93,35 +120,50 @@ def execute() -> None:
     try:
         save_run(new_run_state(start, end, int(limit), "bnl_research"))
         st.session_state.bnl_run["queries_planned"] = len(active_search_strings)
-        st.session_state.bnl_run["run_mode"] = run_mode
+        st.session_state.bnl_run["safe_test_mode"] = safe_test_mode
         completed_run = run_newsletter_search(
             active_search_strings,
             diseases,
             start,
             end,
             int(limit),
-            searchers=(("SerpApi Google", search_serpapi_google),),
+            searchers=(("SerpApi Google", lambda query, begin, finish, pages, log: search_serpapi_google(query, begin, finish, pages, log, retries=retries)),),
             progress=progress,
             state_sink=save_run,
             workflow="bnl_research",
             require_google_coverage=False,
         )
         completed_run["queries_planned"] = len(active_search_strings)
-        completed_run["run_mode"] = run_mode
+        completed_run["safe_test_mode"] = safe_test_mode
         st.session_state.bnl_run = completed_run
         progress_text.success("Search, verification, screening, and export preparation completed. Results remain available while this Streamlit session is open.")
     finally:
         st.session_state.bnl_is_running = False
 
 
-tabs = st.tabs(["RUN", "CANDIDATES", "INCLUDED", "REJECTED", "NEEDS MANUAL REVIEW", "SEARCH LOG", "EXPORT"])
+tabs = st.tabs(["RUN", "RAW RESULTS", "CANDIDATES", "INCLUDED", "REJECTED", "NEEDS MANUAL REVIEW", "SEARCH LOG", "EXPORT"])
 
 with tabs[0]:
     st.subheader("BNL Research Search & Screening")
     st.write(f"Inclusive date range: {start.strftime('%d %B %Y')} → {end.strftime('%d %B %Y')}")
     st.caption("The original search strings are executed sequentially and unchanged through Google Search via SerpApi. Crossref is used only to enrich DOI metadata.")
-    can_run = valid_search_strings(search_strings) and start <= end and not search_setup_error
-    run_label = "RUN TEST SEARCH" if run_mode == "Test one search string" else "RUN BI-WEEKLY NEWSLETTER"
+    last_success = st.session_state.get("bnl_last_serpapi_success")
+    previous_errors = (st.session_state.bnl_run or {}).get("provider_errors", [])
+    if search_setup_error:
+        st.error("SerpApi not configured")
+    elif previous_errors:
+        st.error("SerpApi error — see Search Log for the retained page-level error details.")
+    elif last_success:
+        st.success("SerpApi connected")
+    else:
+        st.info("SerpApi configured; not yet tested. A network/API request is made only when you press Run.")
+    if last_success:
+        st.caption(f"Last successful SerpApi page: {last_success}")
+    selection_error = "Select exactly one search string for safe test mode." if safe_test_mode and len(active_search_strings) != 1 else "Select at least one search string." if not len(active_search_strings) else ""
+    if selection_error:
+        st.warning(selection_error)
+    can_run = valid_search_strings(search_strings) and start <= end and not search_setup_error and not selection_error
+    run_label = "RUN SAFE TEST SEARCH" if safe_test_mode else "RUN SELECTED BNL SEARCH"
     if st.button(run_label, type="primary", disabled=not can_run or st.session_state.bnl_is_running):
         execute()
 
@@ -130,7 +172,7 @@ with tabs[0]:
         st.subheader(f"Stored result — {run['run_status']}")
         metrics = st.columns(6)
         metrics[0].metric("Queries attempted", f"{len(run['search_coverage'])}/{run.get('queries_planned', len(run['search_coverage']))}")
-        metrics[1].metric("Raw results", run["funnel"]["records_retrieved"])
+        metrics[1].metric("Raw organic results", run["funnel"]["raw_organic_results"])
         metrics[2].metric("Unique candidates", run["funnel"]["remaining_after_deduplication"])
         metrics[3].metric("Verified", run["funnel"]["verified_candidates"])
         metrics[4].metric("Included", run["funnel"]["final_included"])
@@ -150,21 +192,25 @@ with tabs[0]:
 run = st.session_state.bnl_run
 if run:
     with tabs[1]:
-        st.dataframe(pd.DataFrame(run["candidates"]), hide_index=True, use_container_width=True)
+        st.caption("Raw Google organic results, retained before deduplication and source verification.")
+        raw_columns = ["title", "paper_url", "google_snippet", "google_displayed_date", "discovery_query_number", "discovery_query", "discovery_page", "discovery_rank"]
+        st.dataframe(pd.DataFrame(run["raw"]).reindex(columns=raw_columns), hide_index=True, use_container_width=True)
     with tabs[2]:
+        st.dataframe(pd.DataFrame(run["candidates"]), hide_index=True, use_container_width=True)
+    with tabs[3]:
         final = pd.DataFrame(newsletter_rows(run["included"]), columns=NEWSLETTER_COLUMNS)
         st.dataframe(final, hide_index=True, use_container_width=True)
         for paper in run["included"]:
             if paper.get("paper_url"):
                 st.link_button(f"Open source: {paper.get('title', 'Article')}", paper["paper_url"])
-    with tabs[3]:
-        st.dataframe(pd.DataFrame(run["rejected"]), hide_index=True, use_container_width=True)
     with tabs[4]:
-        st.dataframe(pd.DataFrame(run["pending"]), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(run["rejected"]), hide_index=True, use_container_width=True)
     with tabs[5]:
+        st.dataframe(pd.DataFrame(run["pending"]), hide_index=True, use_container_width=True)
+    with tabs[6]:
         st.dataframe(pd.DataFrame(run["logs"]), hide_index=True, use_container_width=True)
         st.dataframe(pd.DataFrame(run["search_coverage"]), hide_index=True, use_container_width=True)
-    with tabs[6]:
+    with tabs[7]:
         csv, xlsx, markdown, audit = exports(
             run["included"], run["start"], run["end"], candidates=run["candidates"],
             rejected=run["rejected"], pending=run["pending"], search_log=run["logs"],

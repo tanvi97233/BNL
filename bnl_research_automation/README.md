@@ -27,9 +27,15 @@ Click **Run Bi-Weekly Newsletter** after choosing the dates. The application run
 
 Configure `SERPAPI_API_KEY` in `.env` locally or Streamlit Secrets in Cloud. SerpApi usage may incur charges. Use `GROQ_API_KEY` for Groq screening or `XAI_API_KEY` for xAI/Grok screening; without a screening key, candidates remain in **Needs Manual Review** and an API/model failure is never treated as scientific rejection.
 
+## Low-credit diagnostic run
+
+The sidebar starts in **Safe single-request test mode**. Select exactly one of the 36 unchanged source strings and press **RUN SAFE TEST SEARCH**. It requests page 1 only and makes no automatic retry, so its request estimate is exactly one SerpApi search request. The **RAW RESULTS** tab shows every extracted Google organic result before deduplication or scientific screening. The **SEARCH LOG** tab records the HTTP status, SerpApi status/error, exact returned query, date-filter parameter, start offset, organic-result count, extracted-record count, and timestamp without exposing the API key.
+
+Turn off safe mode only after inspecting that result. You may select any subset of strings and choose one to five pages; the sidebar displays both the baseline request count and the worst-case count if retries are needed.
+
 ## What happens in a run
 
-For every original query, the app calls Europe PMC, records the actual provider URL/status, normalizes records, applies bounded result limits, deduplicates by DOI/PMID/title, checks date/content metadata, enriches DOI records through Crossref, then performs AI and programmatic SOP checks.
+For every selected original query, the app calls Google Search through SerpApi, records the actual page-level provider response, preserves raw organic results, fetches source metadata, enriches DOI records through Crossref when available, deduplicates by DOI/PMID/title, then performs AI and programmatic SOP checks. A source-fetch, metadata, or AI error produces an auditable manual-review/pending outcome rather than a scientific rejection.
 
 The Run tab retains the completed funnel, provider errors, warnings, records, decisions, and exports in Streamlit session state while the browser session remains open. The results do not rerun merely because the user changes tabs.
 
