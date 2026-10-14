@@ -8,11 +8,11 @@ import pandas as pd
 
 try:  # package imports for repository-wide tests
     from .core import apply_screening, deduplicate, deterministic_status, final_publication_status, parse_publication_date
-    from .providers import crossref_fields, enrich_crossref, fetch_google_candidate, search_europe_pmc, search_openalex
+    from .providers import crossref_fields, enrich_crossref, fetch_article_candidate, search_serpapi_google
     from .screening import screen_paper
 except ImportError:  # direct Streamlit execution from this directory
     from core import apply_screening, deduplicate, deterministic_status, final_publication_status, parse_publication_date
-    from providers import crossref_fields, enrich_crossref, fetch_google_candidate, search_europe_pmc, search_openalex
+    from providers import crossref_fields, enrich_crossref, fetch_article_candidate, search_serpapi_google
     from screening import screen_paper
 
 
@@ -68,7 +68,7 @@ def run_newsletter_search(
     google_entries: dict[int, dict] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
     state_sink: Callable[[dict], None] | None = None,
-    searchers: tuple[tuple[str, Callable], ...] = (("Europe PMC", search_europe_pmc),),
+    searchers: tuple[tuple[str, Callable], ...] = (("SerpApi Google", search_serpapi_google),),
     screener: Callable = screen_paper,
     crossref: Callable = enrich_crossref,
     workflow: str = "bnl_research",
@@ -80,15 +80,7 @@ def run_newsletter_search(
 
     for _, row in search_strings.iterrows():
         number, query = int(row["number"]), str(row["search_string"])
-        coverage = {"search_string_number": number, "original_query": query, "date_range": f"{start} to {end}", "providers": [], "google_status": "NOT REVIEWED", "pages_reviewed": 0, "candidate_urls": [], "errors": []}
-        google = google_entries.get(number, {})
-        if google:
-            coverage.update({"google_status": "MANUALLY REVIEWED" if google.get("reviewed") else "NOT REVIEWED", "pages_reviewed": google.get("pages_reviewed", 0), "candidate_urls": google.get("urls", [])})
-            for url in google.get("urls", []):
-                paper = fetch_google_candidate(url, state["logs"] .append)
-                paper["search_strings_found"] = [f"Search string {number}"]
-                paper["sources_found"] = ["Google manual candidate"]
-                state["raw"].append(paper)
+        coverage = {"search_string_number": number, "original_query": query, "date_range": f"{start} to {end}", "providers": [], "pages_attempted": 0, "candidate_urls": [], "errors": []}
         for provider_name, finder in searchers:
             local_logs: list[dict] = []
             try:
@@ -99,9 +91,18 @@ def run_newsletter_search(
                 for paper in found:
                     paper["search_strings_found"] = [f"Search string {number}"]
                     paper["sources_found"] = [provider_name]
+                    paper["discovery_query_number"] = number
                     state["raw"].append(paper)
-                capped = len(found) >= limit
-                coverage["providers"].append({"provider": provider_name, "status": "COMPLETE", "records": len(found), "result_cap_reached": capped})
+                capped = False
+                page_logs = [entry for entry in local_logs if entry.get("page")]
+                failed_pages = [entry for entry in page_logs if entry.get("status") == "error"]
+                coverage["pages_attempted"] += len(page_logs)
+                coverage["candidate_urls"].extend([paper.get("paper_url", "") for paper in found if paper.get("paper_url")])
+                status = "PARTIAL" if failed_pages and found else "ERROR" if failed_pages else "COMPLETE"
+                coverage["providers"].append({"provider": provider_name, "status": status, "records": len(found), "pages_attempted": len(page_logs), "failed_pages": len(failed_pages), "result_cap_reached": capped})
+                if failed_pages:
+                    for failure in failed_pages:
+                        state["provider_errors"].append({"provider": provider_name, "search_string_number": number, "page": failure.get("page"), "error": failure.get("error", "")})
                 if capped:
                     state["warnings"].append(f"{provider_name} reached the {limit}-record cap for search string {number}; additional records may exist.")
             except Exception as exc:  # provider errors never halt remaining coverage
@@ -116,7 +117,40 @@ def run_newsletter_search(
     state["funnel"]["records_retrieved"] = len(state["raw"])
     preliminary: list[dict] = []
     for paper in state["raw"]:
+        # SerpApi discovery records are intentionally preserved before source
+        # verification.  Search snippets are not sufficient evidence to call
+        # a result news, an editorial, or an ineligible paper.
+        if not str(paper.get("title") or "").strip():
+            _record_rejection(state, paper, "Missing usable title", "Discovery metadata")
+            continue
+        state["funnel"]["usable_metadata"] += 1
+        preliminary.append(paper)
+
+    state["candidates"] = deduplicate(preliminary)
+    state["funnel"]["remaining_after_deduplication"] = len(state["candidates"])
+    for candidate_index, original_paper in enumerate(state["candidates"]):
+        paper = dict(original_paper)
+        if paper.get("paper_url") and paper.get("source") == "SerpApi Google":
+            fetch_logs: list[dict] = []
+            fetched = fetch_article_candidate(paper["paper_url"], fetch_logs.append)
+            for entry in fetch_logs:
+                entry.update({"search_string_number": "; ".join(paper.get("search_strings_found", [])), "original_query": "source metadata verification", "provider_query_or_url": entry.get("request", "")})
+                state["logs"].append(entry)
+            for field, value in fetched.items():
+                if field in {"source", "paper_url"}:
+                    continue
+                if value not in (None, "", [], {}):
+                    paper[field] = value
+            paper["paper_url"] = fetched.get("paper_url") or paper["paper_url"]
+            paper["verification_status"] = "SOURCE_METADATA_FETCHED" if not fetched.get("fetch_error") else "SOURCE_METADATA_UNAVAILABLE"
+        if paper.get("doi"):
+            crossref_logs: list[dict] = []
+            paper = crossref_fields(paper, crossref(paper["doi"], crossref_logs.append))
+            for entry in crossref_logs:
+                entry.update({"search_string_number": "; ".join(paper.get("search_strings_found", [])), "original_query": "metadata verification", "provider_query_or_url": entry.get("request", "")})
+                state["logs"].append(entry)
         status, reason, bucket = deterministic_status(paper, start, end)
+        state["candidates"][candidate_index] = paper
         if status == "rejected":
             _record_rejection(state, paper, reason, "Deterministic filter")
             if bucket == "non_paper": state["funnel"]["removed_non_paper"] += 1
@@ -128,20 +162,6 @@ def run_newsletter_search(
             state["funnel"]["awaiting_manual_verification"] += 1
             if bucket == "possible_non_final": state["funnel"]["removed_preprint_or_early_access"] += 1
             continue
-        state["funnel"]["usable_metadata"] += 1
-        preliminary.append(paper)
-
-    state["candidates"] = deduplicate(preliminary)
-    state["funnel"]["remaining_after_deduplication"] = len(state["candidates"])
-    for candidate_index, original_paper in enumerate(state["candidates"]):
-        paper = dict(original_paper)
-        if paper.get("doi"):
-            crossref_logs: list[dict] = []
-            paper = crossref_fields(paper, crossref(paper["doi"], crossref_logs.append))
-            for entry in crossref_logs:
-                entry.update({"search_string_number": "; ".join(paper.get("search_strings_found", [])), "original_query": "metadata verification", "provider_query_or_url": entry.get("request", "")})
-                state["logs"].append(entry)
-        state["candidates"][candidate_index] = paper
         verified_date = parse_publication_date(paper.get("verified_publication_date") or paper.get("publication_date"))
         if not verified_date:
             _record_pending(state, paper, "Verified publication date is unavailable")

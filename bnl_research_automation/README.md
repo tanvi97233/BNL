@@ -1,6 +1,6 @@
 # BNL Research Automation
 
-Local Streamlit application for the Bi-Weekly Newsletter research-paper workflow. It preserves the 36 approved BNL queries and disease areas in `data/`, uses Europe PMC as its single automated discovery backend, verifies DOI metadata through Crossref when available, and supports Groq/xAI screening.
+Local Streamlit application for the Bi-Weekly Newsletter research-paper workflow. It preserves the 36 approved BNL queries and disease areas in `data/`, uses SerpApi's Google Search API as its single automated discovery backend, verifies DOI metadata through Crossref when available, and supports Groq/xAI screening.
 
 ## Run
 
@@ -23,9 +23,9 @@ installation is required for this deployment. See the repository
 
 ## Single workflow
 
-Click **Run Bi-Weekly Newsletter** after choosing the dates. The application runs all 36 original queries sequentially through Europe PMC, preserving each source query and request URL in Search Log. Europe PMC paginates up to five API pages per query and respects the configured record cap. Crossref only enriches DOI metadata; it is not a discovery provider.
+Click **Run Bi-Weekly Newsletter** after choosing the dates. The application runs all 36 original queries sequentially through Google Search via SerpApi, preserving each source query, page, rank, snippet, returned Google URL, and request status in Search Log. It sends Google's custom date filter as `tbs=cdr:1,cd_min:MM/DD/YYYY,cd_max:MM/DD/YYYY` and requests offsets 0, 10, 20, 30, and 40, stopping early only when Google/SerpApi returns no further organic page. Crossref only enriches DOI metadata; it is not a discovery provider.
 
-Use `GROQ_API_KEY` for Groq screening or `XAI_API_KEY` for xAI/Grok screening. Both may incur API charges. Without a screening key, candidates remain in **Needs Manual Review**; an API/model failure is never treated as scientific rejection.
+Configure `SERPAPI_API_KEY` in `.env` locally or Streamlit Secrets in Cloud. SerpApi usage may incur charges. Use `GROQ_API_KEY` for Groq screening or `XAI_API_KEY` for xAI/Grok screening; without a screening key, candidates remain in **Needs Manual Review** and an API/model failure is never treated as scientific rejection.
 
 ## What happens in a run
 
@@ -35,7 +35,7 @@ The Run tab retains the completed funnel, provider errors, warnings, records, de
 
 ## Scope and limitation
 
-No Google Search API is configured. This deployable workflow makes no claim that it completed a Google search; it is a Europe PMC scientific-literature workflow. The remaining Google/browser modules are retained in the repository for legacy local use but are not part of the Streamlit application.
+This deployable workflow uses the SerpApi Google Search API. It records the actual returned Google URL and date-filter request for every page, but independently verifies publication date and final-journal status from source metadata/Crossref before inclusion. The remaining browser modules are retained in the repository for legacy local use but are not part of the Streamlit application.
 
 ## Exports
 

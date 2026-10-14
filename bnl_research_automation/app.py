@@ -13,12 +13,12 @@ from dotenv import load_dotenv
 try:  # Community Cloud runs from the repository root.
     from bnl_research_automation.core import NEWSLETTER_COLUMNS, exports, newsletter_rows, valid_search_strings
     from bnl_research_automation.pipeline import FUNNEL_KEYS, new_run_state, run_newsletter_search
-    from bnl_research_automation.providers import search_europe_pmc
+    from bnl_research_automation.providers import search_serpapi_google, serpapi_setup_error
     from bnl_research_automation.screening import ai_provider
 except ModuleNotFoundError:  # Local: python -m streamlit run app.py
     from core import NEWSLETTER_COLUMNS, exports, newsletter_rows, valid_search_strings
     from pipeline import FUNNEL_KEYS, new_run_state, run_newsletter_search
-    from providers import search_europe_pmc
+    from providers import search_serpapi_google, serpapi_setup_error
     from screening import ai_provider
 
 
@@ -26,7 +26,7 @@ ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
 st.set_page_config(page_title="BNL Research Automation", layout="wide")
 st.title("BNL Research Automation")
-st.caption("BNL Research Search & Screening — Europe PMC discovery, metadata verification, SOP screening, and Excel export.")
+st.caption("BNL Research Search & Screening — Google discovery via SerpApi, metadata verification, SOP screening, and Excel export.")
 
 search_strings = pd.read_csv(ROOT / "data/search_strings.example.csv")
 diseases = pd.read_csv(ROOT / "data/disease_areas.example.csv")["disease_area"].dropna().astype(str).tolist()
@@ -51,8 +51,11 @@ with st.sidebar:
     if (end - start).days != 14:
         st.warning("Selected range is not 14 days.")
     st.header("Search configuration")
-    limit = st.selectbox("Maximum records per search string", [50, 100, 200], index=1)
-    st.caption("Europe PMC requests up to five API pages per string and stops sooner when the selected record cap or available results are reached.")
+    limit = st.selectbox("Maximum Google result pages per search string", [1, 2, 3, 4, 5], index=4)
+    st.caption("SerpApi requests Google result offsets 0, 10, 20, 30, and 40 up to this limit, stopping when Google supplies no next page.")
+    search_setup_error = serpapi_setup_error()
+    if search_setup_error:
+        st.error(search_setup_error)
     provider = ai_provider()
     st.info(f"Screening provider: {provider}" if provider else "No AI screening key configured. Candidates will remain in Needs Manual Review; no scientific rejection is inferred.")
 
@@ -86,7 +89,7 @@ def execute() -> None:
             start,
             end,
             int(limit),
-            searchers=(("Europe PMC", search_europe_pmc),),
+            searchers=(("SerpApi Google", search_serpapi_google),),
             progress=progress,
             state_sink=save_run,
             workflow="bnl_research",
@@ -102,8 +105,8 @@ tabs = st.tabs(["RUN", "CANDIDATES", "INCLUDED", "REJECTED", "NEEDS MANUAL REVIE
 with tabs[0]:
     st.subheader("BNL Research Search & Screening")
     st.write(f"Inclusive date range: {start.strftime('%d %B %Y')} → {end.strftime('%d %B %Y')}")
-    st.caption("The original 36 search strings are executed sequentially and unchanged. Europe PMC is the single automated discovery backend; Crossref is used only to enrich DOI metadata.")
-    can_run = valid_search_strings(search_strings) and start <= end
+    st.caption("The original 36 search strings are executed sequentially and unchanged through Google Search via SerpApi. Crossref is used only to enrich DOI metadata.")
+    can_run = valid_search_strings(search_strings) and start <= end and not search_setup_error
     if st.button("RUN BI-WEEKLY NEWSLETTER", type="primary", disabled=not can_run or st.session_state.bnl_is_running):
         execute()
 

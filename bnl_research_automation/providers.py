@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import time
+import os
 from datetime import date
 from html import unescape
 from typing import Callable
@@ -13,6 +14,7 @@ import requests
 TIMEOUT = 30
 MAX_API_PAGES = 5
 USER_AGENT = "BNL-Research-Automation/1.1 (local literature review)"
+SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
 
 
 def _request(url: str, *, params: dict | None, log: Callable[[dict], None], provider: str) -> dict:
@@ -139,7 +141,11 @@ def crossref_fields(paper: dict, message: dict) -> dict:
     updated["volume"] = message.get("volume") or updated.get("volume", "")
     updated["issue"] = message.get("issue") or updated.get("issue", "")
     updated["crossref_final_issue"] = bool(message.get("volume") or message.get("issue"))
-    updated["paper_url"] = message.get("URL") or updated.get("paper_url", "")
+    # Preserve the Google-discovered original article URL for traceability;
+    # Crossref's URL is supplementary metadata, not a replacement discovery
+    # source.
+    updated["paper_url"] = updated.get("paper_url") or message.get("URL") or ""
+    updated["crossref_url"] = message.get("URL") or updated.get("crossref_url", "")
     return updated
 
 
@@ -148,14 +154,87 @@ def build_google_search_url(query: str, start: date, end: date) -> str:
     return "https://www.google.com/search?" + urlencode({"q": query, "tbs": f"cdr:1,cd_min:{start:%m/%d/%Y},cd_max:{end:%m/%d/%Y}"})
 
 
+class SerpApiSetupError(RuntimeError):
+    pass
+
+
+def serpapi_setup_error() -> str | None:
+    if not os.getenv("SERPAPI_API_KEY", "").strip():
+        return "SERPAPI_API_KEY is required. Add it to Streamlit Secrets before running BNL Research Search & Screening."
+    return None
+
+
+def _serpapi_record(item: dict, *, query_number: int, query: str, page: int, google_url: str) -> dict:
+    """Normalize an organic Google result without pretending it is paper metadata."""
+    link = str(item.get("link") or "")
+    return {
+        "title": item.get("title") or "", "abstract": item.get("snippet") or "",
+        "google_snippet": item.get("snippet") or "", "google_displayed_date": item.get("date") or "",
+        "authors": [], "journal": "", "source_name": item.get("displayed_link") or "",
+        "publication_date": "", "source_date": "", "doi": "", "pmid": "",
+        "paper_url": link, "original_url": link, "publication_types": [], "mesh_terms": [], "topics": [],
+        "is_open_access": None, "source": "SerpApi Google", "volume": "", "issue": "", "is_preprint": False,
+        "search_strings_found": [f"Search string {query_number}"], "sources_found": ["SerpApi Google"],
+        "discovery_query": query, "discovery_query_number": query_number, "discovery_page": page,
+        "discovery_rank": item.get("position"), "google_results_url": google_url,
+        "raw_result_metadata": item,
+    }
+
+
+def search_serpapi_google(query: str, start_date: date, end_date: date, limit: int, log: Callable[[dict], None], *, query_number: int = 0) -> list[dict]:
+    """Run up to five sequential SerpApi Google result pages for one exact BNL query."""
+    setup_error = serpapi_setup_error()
+    if setup_error:
+        raise SerpApiSetupError(setup_error)
+    api_key = os.environ["SERPAPI_API_KEY"]
+    records: list[dict] = []
+    # In the unified workflow ``limit`` is the requested maximum page count.
+    max_pages = max(1, min(5, int(limit)))
+    tbs = f"cdr:1,cd_min:{start_date:%m/%d/%Y},cd_max:{end_date:%m/%d/%Y}"
+    for page in range(1, max_pages + 1):
+        params = {"engine": "google", "q": query, "tbs": tbs, "start": (page - 1) * 10, "num": 10, "api_key": api_key}
+        started = time.monotonic()
+        payload: dict | None = None
+        last_error = ""
+        for attempt in range(3):
+            try:
+                response = requests.get(SERPAPI_ENDPOINT, params=params, timeout=TIMEOUT, headers={"User-Agent": USER_AGENT})
+                if response.status_code in {408, 409, 429} or response.status_code >= 500:
+                    raise requests.HTTPError(f"HTTP {response.status_code}: transient SerpApi response")
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get("error"):
+                    raise RuntimeError(str(payload["error"]))
+                break
+            except (requests.RequestException, ValueError, RuntimeError) as exc:
+                last_error = str(exc)
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+        safe_request = f"engine=google&q=<exact query>&tbs={tbs}&start={(page - 1) * 10}&num=10"
+        if payload is None:
+            log({"provider": "SerpApi Google", "status": "error", "error": last_error, "duration_seconds": round(time.monotonic() - started, 2), "request": safe_request, "page": page, "records": 0, "date_filter": tbs})
+            continue
+        metadata = payload.get("search_metadata") or {}
+        google_url = metadata.get("google_url") or ""
+        organic = payload.get("organic_results") or []
+        log({"provider": "SerpApi Google", "status": "ok", "error": "", "duration_seconds": round(time.monotonic() - started, 2), "request": safe_request, "page": page, "records": len(organic), "date_filter": tbs, "google_url": google_url, "serpapi_status": metadata.get("status", "")})
+        records.extend(_serpapi_record(item, query_number=query_number, query=query, page=page, google_url=google_url) for item in organic if item.get("link"))
+        # No organic results or no next SerpApi page means Google supplied no
+        # further page to process.  Never claim pages that were not returned.
+        if not organic or not (payload.get("serpapi_pagination") or {}).get("next"):
+            break
+        time.sleep(float(os.getenv("SERPAPI_DELAY_SECONDS", "0.2")))
+    return records
+
+
 def _meta(html: str, name: str) -> str:
     pattern = rf'<meta[^>]+(?:name|property)=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)["\']'
     match = re.search(pattern, html, flags=re.I)
     return unescape(match.group(1)).strip() if match else ""
 
 
-def fetch_google_candidate(url: str, log: Callable[[dict], None]) -> dict:
-    """Fetch a URL supplied from a user-reviewed normal Google session."""
+def fetch_article_candidate(url: str, log: Callable[[dict], None]) -> dict:
+    """Fetch article metadata from a discovered source URL without discarding it on failure."""
     started = time.monotonic()
     try:
         response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
@@ -163,7 +242,11 @@ def fetch_google_candidate(url: str, log: Callable[[dict], None]) -> dict:
         html = response.text
         doi_match = re.search(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", html, flags=re.I)
         title = _meta(html, "citation_title") or _meta(html, "og:title") or ""
-        return {"title": title, "abstract": _meta(html, "citation_abstract") or _meta(html, "description"), "authors": [], "journal": _meta(html, "citation_journal_title"), "source_name": _meta(html, "citation_journal_title"), "publication_date": _date(_meta(html, "citation_publication_date")), "source_date": _date(_meta(html, "citation_publication_date")), "doi": _meta(html, "citation_doi") or (doi_match.group(0) if doi_match else ""), "pmid": "", "paper_url": response.url, "publication_types": [], "mesh_terms": [], "topics": [], "is_open_access": None, "source": "Google manual candidate", "volume": _meta(html, "citation_volume"), "issue": _meta(html, "citation_issue"), "is_preprint": False, "google_candidate_urls": [url]}
+        return {"title": title, "abstract": _meta(html, "citation_abstract") or _meta(html, "description"), "authors": [], "journal": _meta(html, "citation_journal_title"), "source_name": _meta(html, "citation_journal_title"), "publication_date": _date(_meta(html, "citation_publication_date")), "source_date": _date(_meta(html, "citation_publication_date")), "doi": _meta(html, "citation_doi") or (doi_match.group(0) if doi_match else ""), "pmid": _meta(html, "citation_pmid"), "paper_url": response.url, "publication_types": [], "mesh_terms": [], "topics": [], "is_open_access": None, "source": "source metadata fetch", "volume": _meta(html, "citation_volume"), "issue": _meta(html, "citation_issue"), "is_preprint": False, "metadata_source_url": response.url}
     except requests.RequestException as exc:
-        log({"provider": "Google manual candidate", "status": "error", "error": str(exc), "duration_seconds": round(time.monotonic() - started, 2), "request": url, "attempt": 1})
-        return {"title": "", "paper_url": url, "source": "Google manual candidate", "fetch_error": str(exc), "google_candidate_urls": [url]}
+        log({"provider": "Source metadata fetch", "status": "error", "error": str(exc), "duration_seconds": round(time.monotonic() - started, 2), "request": url, "attempt": 1})
+        return {"title": "", "paper_url": url, "source": "source metadata fetch", "fetch_error": str(exc), "metadata_source_url": url}
+
+
+# Backwards-compatible name for the retained legacy/manual modules.
+fetch_google_candidate = fetch_article_candidate
