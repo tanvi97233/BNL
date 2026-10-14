@@ -46,7 +46,10 @@ if "is_running" not in st.session_state:
     st.session_state.is_running = False
 
 with st.sidebar:
-    st.success(f"BNL configuration ready: {len(search_strings)}/36 search strings; {len(diseases)} disease areas") if valid_search_strings(search_strings) else st.error("The bundled search-string configuration is invalid.")
+    if valid_search_strings(search_strings):
+        st.success(f"BNL configuration ready: {len(search_strings)}/36 search strings; {len(diseases)} disease areas")
+    else:
+        st.error("The bundled search-string configuration is invalid.")
     workflow = st.radio("Research workflow", list(WORKFLOWS), format_func=lambda key: WORKFLOWS[key])
     st.header("Date Range")
     default_end = date.today(); default_start = default_end - timedelta(days=14)
