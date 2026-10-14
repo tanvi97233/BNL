@@ -7,11 +7,22 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-from core import NEWSLETTER_COLUMNS, exports, newsletter_rows, valid_search_strings
-from pipeline import FUNNEL_KEYS, new_run_state, run_newsletter_search
-from providers import build_google_search_url
-from screening import ai_provider
-from xai_web import search_grok_web, web_search_setup_error
+# Community Cloud runs the command from the repository root even when this
+# nested file is selected as the entry point.  Package imports therefore make
+# the full application work there, while the fallback preserves ``streamlit
+# run app.py`` from this directory for local users.
+try:
+    from bnl_research_automation.core import NEWSLETTER_COLUMNS, exports, newsletter_rows, valid_search_strings
+    from bnl_research_automation.pipeline import FUNNEL_KEYS, new_run_state, run_newsletter_search
+    from bnl_research_automation.providers import build_google_search_url, search_europe_pmc, search_openalex
+    from bnl_research_automation.screening import ai_provider
+    from bnl_research_automation.xai_web import search_grok_web, web_search_setup_error
+except ModuleNotFoundError:
+    from core import NEWSLETTER_COLUMNS, exports, newsletter_rows, valid_search_strings
+    from pipeline import FUNNEL_KEYS, new_run_state, run_newsletter_search
+    from providers import build_google_search_url, search_europe_pmc, search_openalex
+    from screening import ai_provider
+    from xai_web import search_grok_web, web_search_setup_error
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
@@ -88,7 +99,7 @@ with tabs[0]:
     if workflow == "literature":
         st.caption("Supplementary discovery through Europe PMC and OpenAlex. It does not claim Google SOP coverage.")
         if st.button("RUN LITERATURE DISCOVERY", type="primary", disabled=not can_run or st.session_state.is_running):
-            execute(searchers=(("Europe PMC", __import__("providers").search_europe_pmc), ("OpenAlex", __import__("providers").search_openalex)), require_google_coverage=False)
+            execute(searchers=(("Europe PMC", search_europe_pmc), ("OpenAlex", search_openalex)), require_google_coverage=False)
     elif workflow == "google_manual":
         reviewed = sum(bool(item.get("reviewed")) for item in st.session_state.google_entries.values())
         captured = sum(len(item.get("urls", [])) for item in st.session_state.google_entries.values())

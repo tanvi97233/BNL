@@ -13,6 +13,14 @@ python -m streamlit run app.py
 
 Create `.env` from `.env.example` and configure either `GROQ_API_KEY` or `XAI_API_KEY` for automatic screening. API use may require credits. Without a key, records remain in **Pending Review** rather than being treated as irrelevant.
 
+## Streamlit Community Cloud
+
+Select **`bnl_research_automation/app.py`** as the Main file path. This is the
+complete BNL application; it provides all three workflows and all result and
+export tabs. It deliberately does not use Playwright, so no Chromium browser
+installation is required for this deployment. See the repository
+[`DEPLOYMENT.md`](../DEPLOYMENT.md) for Secrets and redeployment steps.
+
 ## Workflows
 
 1. **Literature APIs** — existing Europe PMC/OpenAlex discovery.
