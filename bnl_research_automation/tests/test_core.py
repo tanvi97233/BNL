@@ -38,7 +38,9 @@ def test_search_string_validation_and_title_normalization():
 def test_date_boundaries_case_and_doi_deduplication():
     assert deterministic_status(paper(publication_date="2026-09-23"), date(2026, 9, 23), date(2026, 10, 7))[0] == "eligible"
     assert deterministic_status(paper(publication_date="2026-10-07"), date(2026, 9, 23), date(2026, 10, 7))[0] == "eligible"
-    assert deterministic_status(paper(publication_date="2026-08-01"), date(2026, 9, 23), date(2026, 10, 7))[0] == "rejected"
+    # A discovery-provider date can be superseded by Crossref final metadata,
+    # so it is retained for final verification rather than silently rejected.
+    assert deterministic_status(paper(publication_date="2026-08-01"), date(2026, 9, 23), date(2026, 10, 7))[0] == "eligible"
     assert "Case" in deterministic_status(paper(title="A case report"), date(2026, 9, 23), date(2026, 10, 7))[1]
     assert deterministic_status(paper(title=None), date(2026, 9, 23), date(2026, 10, 7))[0] == "rejected"
     assert len(deduplicate([paper(), paper(title="Changed", sources_found=["OpenAlex"])])) == 1
@@ -57,8 +59,8 @@ def test_six_column_export_and_audit_retains_url():
     assert list(pd.read_csv(__import__("io").BytesIO(csv)).columns) == NEWSLETTER_COLUMNS
     assert b"https://example.test/article" in audit
     workbook = load_workbook(BytesIO(xlsx))
-    assert workbook.sheetnames == ["Included Papers", "Rejected Papers", "Pending Review", "Search Log"]
-    assert [cell.value for cell in workbook["Included Papers"][1]] == NEWSLETTER_COLUMNS
+    assert workbook.sheetnames == ["Included", "Candidates", "Rejected", "Needs Manual Review", "Search Log"]
+    assert [cell.value for cell in workbook["Included"][1]] == NEWSLETTER_COLUMNS
     assert len(xlsx) > 1000 and "Clinical Immunology" in markdown
 
 
@@ -87,3 +89,17 @@ def test_ai_failure_is_pending(monkeypatch):
     monkeypatch.setattr(f"{SCREENING_PATH}.requests.post", lambda *args, **kwargs: (_ for _ in ()).throw(__import__("requests").ConnectionError("offline")))
     outcome = screen_paper(paper(), ["Rheumatoid arthritis"], date(2026, 9, 23), date(2026, 10, 7))
     assert outcome["screening_status"] == "AI SCREENING PENDING"
+
+
+def test_crossref_final_date_can_rescue_discovery_date_and_ai_uncertainty_is_pending():
+    strings = pd.DataFrame({"number": [1], "search_string": ["exact source query"]})
+    discovery = paper(publication_date="2026-08-01", source_date="2026-08-01")
+    crossref = lambda *_: {"published-print": {"date-parts": [[2026, 10, 1]]}, "container-title": ["Clinical Immunology"], "volume": "12", "issue": "3"}
+    screened = lambda *_: {**decision(), "screening_status": "SCREENED"}
+    state = run_newsletter_search(strings, ["Rheumatoid arthritis"], date(2026, 9, 23), date(2026, 10, 7), 50, searchers=(("Mock", lambda *_: [discovery]),), screener=screened, crossref=crossref)
+    assert len(state["included"]) == 1
+    assert state["included"][0]["verified_publication_date"] == "2026-10-01"
+
+    uncertain = run_newsletter_search(strings, ["Rheumatoid arthritis"], date(2026, 9, 23), date(2026, 10, 7), 50, searchers=(("Mock", lambda *_: [paper()]),), screener=lambda *_: {"include": False, "reason": "Insufficient evidence for qualification", "screening_status": "SCREENED"}, crossref=lambda *_: {})
+    assert not uncertain["rejected"]
+    assert len(uncertain["pending"]) == 1

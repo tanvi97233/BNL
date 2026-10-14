@@ -61,8 +61,11 @@ def deterministic_status(paper: dict, start: date, end: date) -> tuple[str, str,
     published = parse_publication_date(paper.get("publication_date"))
     if not published:
         return "pending", "Publication date needs manual verification", "needs_date_verification"
+    # Provider dates are discovery metadata.  A DOI record may receive a more
+    # authoritative final journal date from Crossref later in the pipeline, so
+    # do not permanently reject it before that check.
     if not start <= published <= end:
-        return "rejected", "Outside selected date range", "outside_date_range"
+        return "eligible", "Provider publication date requires final verification", "needs_date_verification"
     if paper.get("is_preprint"):
         return "rejected", "Confirmed preprint", "preprint"
     blob = " ".join([title, text(paper.get("abstract")), " ".join(text(item) for item in (paper.get("publication_types") or []))]).lower()
@@ -176,14 +179,15 @@ def _audit_frame(items: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(items).drop(columns=["abstract"], errors="ignore")
 
 
-def exports(included: list[dict], start: date, end: date, *, rejected: list[dict] | None = None, pending: list[dict] | None = None, search_log: list[dict] | None = None) -> tuple[bytes, bytes, str, bytes]:
+def exports(included: list[dict], start: date, end: date, *, candidates: list[dict] | None = None, rejected: list[dict] | None = None, pending: list[dict] | None = None, search_log: list[dict] | None = None) -> tuple[bytes, bytes, str, bytes]:
     main = pd.DataFrame(newsletter_rows(included), columns=NEWSLETTER_COLUMNS)
     csv = main.to_csv(index=False).encode()
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        main.to_excel(writer, index=False, sheet_name="Included Papers")
-        _audit_frame(rejected or []).to_excel(writer, index=False, sheet_name="Rejected Papers")
-        _audit_frame(pending or []).to_excel(writer, index=False, sheet_name="Pending Review")
+        main.to_excel(writer, index=False, sheet_name="Included")
+        _audit_frame(candidates or []).to_excel(writer, index=False, sheet_name="Candidates")
+        _audit_frame(rejected or []).to_excel(writer, index=False, sheet_name="Rejected")
+        _audit_frame(pending or []).to_excel(writer, index=False, sheet_name="Needs Manual Review")
         _audit_frame(search_log or []).to_excel(writer, index=False, sheet_name="Search Log")
     header = f"# Bi-Weekly Newsletter - Research and Review Papers\n\nDate range covered: {start} to {end}\n\nTotal papers included: {len(included)}\n\nPrepared on: {date.today()}\n"
     markdown = header + "\n".join(f"\n## {index}. {row['Title']}\n\n**SUMMARY:** {row['Summary']}\n\n**DISEASE AREA:** {row['Disease Area']}\n\n**DATE:** {row['Date']}\n\n**SOURCE NAME:** {row['Source Name']}\n\n**SOURCE DATE:** {row['Source Date']}\n" for index, row in enumerate(newsletter_rows(included), 1))

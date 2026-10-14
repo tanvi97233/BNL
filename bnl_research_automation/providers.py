@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 import requests
 
 TIMEOUT = 30
+MAX_API_PAGES = 5
 USER_AGENT = "BNL-Research-Automation/1.1 (local literature review)"
 
 
@@ -36,12 +37,17 @@ def _date(value: object) -> str:
 
 def _europe_record(item: dict) -> dict:
     journal_info = item.get("journalInfo") or {}
+    # A final print/issue date is more authoritative than an online-first
+    # record.  Crossref remains the final verification source when a DOI is
+    # present; this ordering merely prevents first-publication metadata from
+    # becoming an irreversible early rejection.
+    source_date = _date(journal_info.get("printPublicationDate") or journal_info.get("electronicPublicationDate") or item.get("firstPublicationDate"))
     return {
         "title": item.get("title") or "", "abstract": item.get("abstractText") or "",
         "authors": [author.get("fullName", "") for author in (item.get("authorList") or {}).get("author", [])],
         "journal": item.get("journalTitle") or "", "source_name": item.get("journalTitle") or "",
-        "publication_date": _date(item.get("firstPublicationDate") or journal_info.get("printPublicationDate") or journal_info.get("electronicPublicationDate")),
-        "source_date": _date(journal_info.get("printPublicationDate") or journal_info.get("electronicPublicationDate") or item.get("firstPublicationDate")),
+        "publication_date": source_date, "source_date": source_date,
+        "first_publication_date": _date(item.get("firstPublicationDate")),
         "doi": item.get("doi") or "", "pmid": item.get("pmid") or "",
         "paper_url": f"https://europepmc.org/article/{item.get('source', '')}/{item.get('id', '')}",
         "publication_types": (item.get("pubTypeList") or {}).get("pubType", []) or [],
@@ -54,14 +60,19 @@ def _europe_record(item: dict) -> dict:
 def search_europe_pmc(query: str, start_date: date, end_date: date, limit: int, log: Callable[[dict], None]) -> list[dict]:
     """Keep the original Boolean query intact and apply the API date constraint separately."""
     records, cursor = [], "*"
-    # P_PDATE is Europe PMC's publication-date field.  The original Google
-    # query remains untouched in provenance; this is the provider-specific
-    # date clause needed for bounded API retrieval.
-    provider_query = f"({query}) AND P_PDATE:[{start_date.isoformat()} TO {end_date.isoformat()}]"
-    while len(records) < limit and cursor:
+    # Europe PMC's user-facing date filtering is based on FIRST_PDATE.  Using
+    # print-only P_PDATE at discovery silently misses electronically published
+    # journal papers.  The original query remains untouched in provenance;
+    # final issue/date eligibility is enforced after Crossref verification.
+    provider_query = f"({query}) AND FIRST_PDATE:[{start_date.isoformat()} TO {end_date.isoformat()}]"
+    page_number = 0
+    while len(records) < limit and cursor and page_number < MAX_API_PAGES:
+        page_number += 1
         payload = _request("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={"query": provider_query, "format": "json", "pageSize": min(100, limit - len(records)), "cursorMark": cursor, "resultType": "core"}, log=log, provider="Europe PMC")
         batch = payload.get("resultList", {}).get("result", [])
         records.extend(_europe_record(item) for item in batch)
+        if payload:
+            log({"provider": "Europe PMC", "status": "page", "error": "", "duration_seconds": 0, "request": "", "page": page_number, "records": len(batch), "pages_available_or_processed": page_number})
         next_cursor = payload.get("nextCursorMark")
         if not batch or not next_cursor or next_cursor == cursor:
             break

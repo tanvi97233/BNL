@@ -1,6 +1,6 @@
 # BNL Research Automation
 
-Local Streamlit application for the Bi-Weekly Newsletter research-paper workflow. It preserves the 36 approved BNL queries and disease areas in `data/`, uses Europe PMC and OpenAlex as supplementary literature discovery sources, and supports Groq/xAI screening.
+Local Streamlit application for the Bi-Weekly Newsletter research-paper workflow. It preserves the 36 approved BNL queries and disease areas in `data/`, uses Europe PMC as its single automated discovery backend, verifies DOI metadata through Crossref when available, and supports Groq/xAI screening.
 
 ## Run
 
@@ -21,29 +21,21 @@ export tabs. It deliberately does not use Playwright, so no Chromium browser
 installation is required for this deployment. See the repository
 [`DEPLOYMENT.md`](../DEPLOYMENT.md) for Secrets and redeployment steps.
 
-## Workflows
+## Single workflow
 
-1. **Literature APIs** — existing Europe PMC/OpenAlex discovery.
-2. **Manual Google Batch Review** — 36 guided normal-browser Google reviews. The app opens each exact, custom-date URL one at a time, saves the pasted article URLs, then processes all captured URLs through the same metadata, Crossref, screening, summary, and export pipeline.
-3. **Grok Live Web Search (Experimental)** — sends each of the 36 source strings sequentially to xAI's Responses API with its `web_search` tool enabled. It is distinct from Groq and requires an xAI account/key with a compatible model and available API credits:
+Click **Run Bi-Weekly Newsletter** after choosing the dates. The application runs all 36 original queries sequentially through Europe PMC, preserving each source query and request URL in Search Log. Europe PMC paginates up to five API pages per query and respects the configured record cap. Crossref only enriches DOI metadata; it is not a discovery provider.
 
-```text
-XAI_API_KEY=...
-XAI_WEB_MODEL=grok-4.7
-XAI_BASE_URL=https://api.x.ai/v1
-```
-
-The workflow does not silently fall back to text-only generation. It requires evidence that xAI's web-search tool was invoked, records individual failures, retains completed strings after partial failure, and then sends returned candidates through the existing verification and SOP gates.
+Use `GROQ_API_KEY` for Groq screening or `XAI_API_KEY` for xAI/Grok screening. Both may incur API charges. Without a screening key, candidates remain in **Needs Manual Review**; an API/model failure is never treated as scientific rejection.
 
 ## What happens in a run
 
-For every original query, the app calls Europe PMC and OpenAlex sequentially, records the actual provider URL/status, normalizes records, applies bounded result limits, deduplicates by DOI/PMID/title, checks date/content metadata, enriches DOI records through Crossref, then performs AI and programmatic SOP checks.
+For every original query, the app calls Europe PMC, records the actual provider URL/status, normalizes records, applies bounded result limits, deduplicates by DOI/PMID/title, checks date/content metadata, enriches DOI records through Crossref, then performs AI and programmatic SOP checks.
 
 The Run tab retains the completed funnel, provider errors, warnings, records, decisions, and exports in Streamlit session state while the browser session remains open. The results do not rerun merely because the user changes tabs.
 
-## Google coverage
+## Scope and limitation
 
-No Google Search API is configured. The app does **not** pretend that Europe PMC/OpenAlex complete the Google-based SOP. The manual batch workflow records all 36 reviews individually, including reviewed-page count and candidate URLs. It never bypasses CAPTCHAs or other Google controls.
+No Google Search API is configured. This deployable workflow makes no claim that it completed a Google search; it is a Europe PMC scientific-literature workflow. The remaining Google/browser modules are retained in the repository for legacy local use but are not part of the Streamlit application.
 
 ## Exports
 
@@ -56,7 +48,7 @@ The `Included Papers` worksheet and newsletter CSV contain exactly:
 5. Source Name
 6. Source Date
 
-The Excel workbook also includes audit-only `Rejected Papers`, `Pending Review`, and `Search Log` sheets. The separate audit CSV retains URLs, identifiers, provenance, and screening details.
+The Excel workbook contains `Included`, `Candidates`, `Rejected`, `Needs Manual Review`, and `Search Log` sheets. The separate audit CSV retains URLs, identifiers, provenance, and screening details.
 
 Included summaries must be one paragraph, 160–180 words, and use the required BNL transition phrases. Journal impact factor is displayed as `Impact factor not verified` unless a reliable verification source has been integrated; the app never invents it.
 

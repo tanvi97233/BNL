@@ -19,7 +19,7 @@ except ImportError:  # direct Streamlit execution from this directory
 FUNNEL_KEYS = [
     "records_retrieved", "usable_metadata", "passed_date_checks", "removed_non_paper",
     "removed_preprint_or_early_access", "removed_case_reports", "remaining_after_deduplication",
-    "sent_to_ai", "accepted_by_ai", "rejected_by_ai", "pending_screening", "awaiting_manual_verification", "final_included",
+    "verified_candidates", "sent_to_ai", "accepted_by_ai", "rejected_by_ai", "pending_screening", "awaiting_manual_verification", "final_included",
 ]
 
 
@@ -42,6 +42,22 @@ def _record_pending(state: dict, paper: dict, reason: str, status: str = "NEEDS 
     state["manual_verification"].append(item)
 
 
+def _explicit_sop_exclusion(reason: str) -> bool:
+    """Only evidence-backed exclusions become final rejections.
+
+    A model saying it lacks evidence is not evidence that a paper is
+    irrelevant.  It remains reviewable instead of disappearing from the
+    newsletter audit.
+    """
+    normalized = reason.lower()
+    return any(term in normalized for term in (
+        "case report", "case series", "case study", "preprint", "editorial",
+        "news", "blog", "press release", "treatment-primary", "treatment focused",
+        "therapy-primary", "drug efficacy", "ineligible paper type",
+        "autoimmunity treatment/non-diagnostic exclusion",
+    ))
+
+
 def run_newsletter_search(
     search_strings: pd.DataFrame,
     diseases: list[str],
@@ -52,11 +68,11 @@ def run_newsletter_search(
     google_entries: dict[int, dict] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
     state_sink: Callable[[dict], None] | None = None,
-    searchers: tuple[tuple[str, Callable], ...] = (("Europe PMC", search_europe_pmc), ("OpenAlex", search_openalex)),
+    searchers: tuple[tuple[str, Callable], ...] = (("Europe PMC", search_europe_pmc),),
     screener: Callable = screen_paper,
     crossref: Callable = enrich_crossref,
-    workflow: str = "literature",
-    require_google_coverage: bool = True,
+    workflow: str = "bnl_research",
+    require_google_coverage: bool = False,
 ) -> dict:
     state = new_run_state(start, end, limit, workflow)
     state["run_status"] = "RUNNING"
@@ -113,18 +129,19 @@ def run_newsletter_search(
             if bucket == "possible_non_final": state["funnel"]["removed_preprint_or_early_access"] += 1
             continue
         state["funnel"]["usable_metadata"] += 1
-        state["funnel"]["passed_date_checks"] += 1
         preliminary.append(paper)
 
     state["candidates"] = deduplicate(preliminary)
     state["funnel"]["remaining_after_deduplication"] = len(state["candidates"])
-    for paper in state["candidates"]:
+    for candidate_index, original_paper in enumerate(state["candidates"]):
+        paper = dict(original_paper)
         if paper.get("doi"):
             crossref_logs: list[dict] = []
             paper = crossref_fields(paper, crossref(paper["doi"], crossref_logs.append))
             for entry in crossref_logs:
                 entry.update({"search_string_number": "; ".join(paper.get("search_strings_found", [])), "original_query": "metadata verification", "provider_query_or_url": entry.get("request", "")})
                 state["logs"].append(entry)
+        state["candidates"][candidate_index] = paper
         verified_date = parse_publication_date(paper.get("verified_publication_date") or paper.get("publication_date"))
         if not verified_date:
             _record_pending(state, paper, "Verified publication date is unavailable")
@@ -139,6 +156,9 @@ def run_newsletter_search(
             _record_pending(state, paper, reason)
             state["funnel"]["awaiting_manual_verification"] += 1
             continue
+        state["candidates"][candidate_index] = paper
+        state["funnel"]["passed_date_checks"] += 1
+        state["funnel"]["verified_candidates"] += 1
         state["funnel"]["sent_to_ai"] += 1
         key = _paper_key(paper)
         decision = state["screening_decisions"].get(key)
@@ -155,19 +175,22 @@ def run_newsletter_search(
             state["included"].append({**item, "final_status": "INCLUDED"})
             state["funnel"]["accepted_by_ai"] += 1
         else:
-            # Lack of evidence is reviewable; explicit policy exclusions remain rejected.
-            if "insufficient evidence" in item["reason"].lower() or "summary must" in reason.lower():
+            # Lack of evidence, a model/date disagreement, malformed summary,
+            # or unmatched configured area remains reviewable.  Only an
+            # explicit exclusion supported by the returned evidence is final.
+            combined_reason = reason or item["reason"]
+            if not _explicit_sop_exclusion(combined_reason):
                 _record_pending(state, item, reason or item["reason"])
                 state["funnel"]["awaiting_manual_verification"] += 1
             else:
                 _record_rejection(state, item, reason or item["reason"], "AI/programmatic screening")
                 state["funnel"]["rejected_by_ai"] += 1
+        if state_sink:
+            state_sink(state)
 
     state["funnel"]["final_included"] = len(state["included"])
     if len(state["included"]) < 10:
         state["warnings"].append(f"Low-yield warning: {len(state['included'])} final included papers. This is a diagnostic signal, not an inclusion quota; inspect funnel, pending review, and Google coverage.")
-    if require_google_coverage and any(item["google_status"] != "MANUALLY REVIEWED" or item["pages_reviewed"] < 5 for item in state["search_coverage"]):
-        state["warnings"].append("Google-based SOP coverage is incomplete. Europe PMC/OpenAlex results are supplementary and do not prove Google review was completed.")
     state["run_status"] = "COMPLETE_WITH_ERRORS" if state["provider_errors"] else "COMPLETE"
     if state_sink:
         state_sink(state)
